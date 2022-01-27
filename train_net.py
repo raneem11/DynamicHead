@@ -28,9 +28,11 @@ from detectron2.engine import SimpleTrainer, DefaultTrainer, default_argument_pa
 from detectron2.evaluation import COCOEvaluator, verify_results
 from detectron2.solver.build import maybe_add_gradient_clipping
 from detectron2.utils.logger import setup_logger
+from detectron2.data.datasets import register_coco_instances
 
 from dyhead import add_dyhead_config
 from extra import add_extra_config
+from web_data import WebDataset, AutoAugmenter
 
 
 class Trainer(DefaultTrainer):
@@ -87,15 +89,8 @@ class Trainer(DefaultTrainer):
 
     @classmethod
     def build_train_loader(cls, cfg):
-        dataset = get_detection_dataset_dicts(
-            cfg.DATASETS.TRAIN,
-            filter_empty=cfg.DATALOADER.FILTER_EMPTY_ANNOTATIONS,
-            min_keypoints=cfg.MODEL.ROI_KEYPOINT_HEAD.MIN_KEYPOINTS_PER_IMAGE
-            if cfg.MODEL.KEYPOINT_ON
-            else 0,
-            proposal_files=cfg.DATASETS.PROPOSAL_FILES_TRAIN if cfg.MODEL.LOAD_PROPOSALS else None,
-        )
-
+        dataset_dict = get_detection_dataset_dicts(cfg.DATASETS.TRAIN)
+        dataset = WebDataset(dataset_dict, AutoAugmenter)
         mapper = None
         if cfg.SEED!=-1:
             sampler = TrainingSampler(len(dataset), seed=cfg.SEED)
@@ -105,8 +100,10 @@ class Trainer(DefaultTrainer):
 
     @classmethod
     def build_test_loader(cls, cfg, dataset_name):
+        dataset_dict = get_detection_dataset_dicts(cfg.DATASETS.TEST)
+        dataset = WebDataset(dataset_dict)
         mapper = None
-        return build_detection_test_loader(cfg, mapper=mapper, dataset_name=dataset_name)
+        return build_detection_test_loader(cfg, dataset=dataset, mapper=mapper)
 
     @classmethod
     def build_optimizer(cls, cfg, model):
@@ -169,6 +166,7 @@ def setup(args):
     Create configs and perform basic setups.
     """
     cfg = get_cfg()
+    cfg.MODEL.MODEL_CHECKPOINT = args.model_checkpoint
     add_dyhead_config(cfg)
     add_extra_config(cfg)
     cfg.merge_from_file(args.config_file)
@@ -177,6 +175,13 @@ def setup(args):
     default_setup(cfg, args)
     return cfg
 
+def register_data(args):
+    register_coco_instances("WebDataset_train", {}, os.path.join(args.data_dir, "train/_annotations.coco.json"), 
+                            os.path.join(args.data_dir,"train"))
+    register_coco_instances("WebDataset_valid", {}, os.path.join(args.data_dir, "valid/_annotations.coco.json"), 
+                            os.path.join(args.data_dir, "valid"))
+    register_coco_instances("WebDataset_test", {},  os.path.join(args.data_dir, "test/_annotations.coco.json"), 
+                             os.path.join(args.data_dir, "test"))
 
 def main(args):
     cfg = setup(args)
@@ -193,9 +198,24 @@ def main(args):
     trainer.resume_or_load(resume=True)
     return trainer.train()
 
-
 if __name__ == "__main__":
-    args = default_argument_parser().parse_args()
+    parser = default_argument_parser()
+    parser.add_argument("--model_checkpoint",
+                        default=None,
+                        type=str,
+                        help="path to load pre-trained model for fine-tuning.")
+    
+    parser.add_argument("--data_dir",
+                        default=None,
+                        type=str,
+                        help="path to dataset.")
+    args = parser.parse_args()
+
+    try:
+        register_data(args)
+    except Exception as e:
+        print(e)
+
     print("Command Line Args:", args)
     launch(
         main,
